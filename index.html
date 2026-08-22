@@ -17,6 +17,16 @@
         let stream = null
         let controls = null
         let detectionHandler = null
+        let fallbackTimer = null
+        let started = false
+        const ZXing = window.ZXingBrowser
+
+        function stopDecoder() {
+          try { controls?.stop?.() } catch (_) {}
+          controls = null
+          if (fallbackTimer) window.clearInterval(fallbackTimer)
+          fallbackTimer = null
+        }
 
         const scannerAdapter = {
           init(config, callback) {
@@ -25,7 +35,6 @@
               callback(new Error('Camera access is not available in this browser.'))
               return
             }
-
             target.innerHTML = ''
             video = document.createElement('video')
             video.autoplay = true
@@ -33,6 +42,7 @@
             video.playsInline = true
             video.setAttribute('playsinline', '')
             video.setAttribute('webkit-playsinline', '')
+            video.setAttribute('aria-label', 'ScanCart live barcode camera')
             video.style.width = '100%'
             video.style.height = '100%'
             video.style.objectFit = 'cover'
@@ -64,26 +74,60 @@
             })
           },
 
-          start() {},
+          start() {
+            started = true
+            if (detectionHandler) this.onDetected(detectionHandler)
+          },
 
           onDetected(handler) {
             detectionHandler = handler
-            if (!video || !window.ZXingBrowser) return
+            if (!started || !video) return
+            stopDecoder()
 
-            try {
-              const Reader = window.ZXingBrowser.BrowserMultiFormatOneDReader || window.ZXingBrowser.BrowserMultiFormatReader
-              if (!Reader) return
-              const reader = new Reader(undefined, { delayBetweenScanSuccess: 250, delayBetweenScanAttempts: 80 })
-              reader.decodeFromVideoElement(video, result => {
-                const text = result?.getText?.() || ''
-                if (text && detectionHandler) detectionHandler({ codeResult: { code: text } })
-              }).then(value => { controls = value }).catch(() => {})
-            } catch (_) {}
+            if (ZXing) {
+              try {
+                const Reader = ZXing.BrowserMultiFormatOneDReader || ZXing.BrowserMultiFormatReader
+                if (!Reader) throw new Error('ZXing barcode reader is unavailable.')
+                const reader = new Reader()
+                const begin = () => {
+                  try {
+                    const result = reader.decodeFromVideoElement(video, decoded => {
+                      const text = decoded?.getText?.() || ''
+                      if (text && detectionHandler) detectionHandler({ codeResult: { code: text } })
+                    })
+                    Promise.resolve(result).then(value => { controls = value }).catch(() => {})
+                  } catch (_) {}
+                }
+                if (video.readyState >= 2) begin()
+                else video.addEventListener('loadeddata', begin, { once: true })
+                return
+              } catch (_) {}
+            }
+
+            if ('BarcodeDetector' in window) {
+              try {
+                const Detector = window.BarcodeDetector
+                const detector = new Detector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'] })
+                const canvas = document.createElement('canvas')
+                const ctx = canvas.getContext('2d', { willReadFrequently: true })
+                fallbackTimer = window.setInterval(async () => {
+                  if (!video || !ctx || video.readyState < 2) return
+                  canvas.width = video.videoWidth
+                  canvas.height = video.videoHeight
+                  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+                  try {
+                    const results = await detector.detect(canvas)
+                    const text = results?.[0]?.rawValue || ''
+                    if (text && detectionHandler) detectionHandler({ codeResult: { code: text } })
+                  } catch (_) {}
+                }, 250)
+              } catch (_) {}
+            }
           },
 
           stop() {
-            try { controls?.stop?.() } catch (_) {}
-            controls = null
+            stopDecoder()
+            started = false
             if (stream) {
               stream.getTracks().forEach(track => track.stop())
               stream = null
@@ -99,6 +143,8 @@
         }
 
         window.Quagga = scannerAdapter
+        // The adapter owns ZXing. ScanCartApp must not start a second decoder on the same video.
+        window.ZXingBrowser = undefined
       })()
     </script>
   </head>
