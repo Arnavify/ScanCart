@@ -11,6 +11,14 @@ function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...cors, ...extra } })
 }
 
+async function assets(request: Request, env: Env) {
+  const response = await env.ASSETS.fetch(request)
+  const headers = new Headers(response.headers)
+  headers.set('Permissions-Policy', 'camera=(self)')
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
 function cleanJson(text: string) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
   return (fenced ? fenced[1] : text).trim()
@@ -184,6 +192,6 @@ export default {
       } catch { return json({ found: false, message: 'AI could not confidently read the package.' }, 422) }
     }
 
-    return env.ASSETS.fetch(request)
+    return assets(request, env)
   },
 }
