@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { BrowserMultiFormatReader } from '@zxing/browser'
+import { BarcodeFormat, DecodeHintType } from '@zxing/library'
 
 type Product = {
   id: string
@@ -23,13 +25,6 @@ type Product = {
 type CartItem = Product & { qty: number }
 type Screen = 'home' | 'scan' | 'product' | 'cart' | 'checkout' | 'success' | 'history'
 
-declare global {
-  interface Window {
-    Quagga?: any
-    ZXingBrowser?: any
-  }
-}
-
 function Icon({ name, size = 24 }: { name: string; size?: number }) {
   const common = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
   const paths: Record<string, JSX.Element> = {
@@ -52,7 +47,7 @@ function stored<T>(key: string, fallback: T): T {
 
 async function resolveProduct(barcode: string, image: string): Promise<Product> {
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), 25000)
+  const timeout = window.setTimeout(() => controller.abort(), 30000)
   try {
     const response = await fetch('/api/resolve', {
       method: 'POST',
@@ -82,12 +77,11 @@ export default function ScanCartApp() {
   const [aiState, setAiState] = useState<'idle'|'reading'|'done'|'unavailable'>('idle')
   const [payment, setPayment] = useState('')
   const [lastOrder, setLastOrder] = useState({ total: 0, items: 0, calories: 0 })
-  const scannerRef = useRef<any>(null)
-  const zxingRef = useRef<any>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null)
+  const controlsRef = useRef<{ stop: () => void } | null>(null)
   const scanLock = useRef(false)
-  const candidates = useRef(new Map<string, number>())
   const mounted = useRef(true)
-  const scannerRootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => () => { mounted.current = false; stopScanner() }, [])
   useEffect(() => localStorage.setItem('scancart-cart', JSON.stringify(cart)), [cart])
@@ -98,17 +92,19 @@ export default function ScanCartApp() {
   const items = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart])
 
   function stopScanner() {
-    try { scannerRef.current?.stop?.() } catch {}
-    scannerRef.current = null
-    try { window.Quagga?.stop?.() } catch {}
-    try { zxingRef.current?.stop?.() } catch {}
-    zxingRef.current = null
-    if (scannerRootRef.current) scannerRootRef.current.innerHTML = ''
+    try { controlsRef.current?.stop?.() } catch {}
+    controlsRef.current = null
+    readerRef.current?.reset?.()
+    readerRef.current = null
+    const video = videoRef.current
+    const stream = video?.srcObject as MediaStream | null
+    stream?.getTracks().forEach(track => track.stop())
+    if (video) video.srcObject = null
     setCameraReady(false)
   }
 
   function captureFrame(): string {
-    const video = scannerRootRef.current?.querySelector('video') as HTMLVideoElement | null
+    const video = videoRef.current
     if (!video?.videoWidth || !video.videoHeight) return ''
     const canvas = document.createElement('canvas')
     const scale = Math.min(1, 1400 / video.videoWidth)
@@ -117,7 +113,7 @@ export default function ScanCartApp() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return ''
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL('image/jpeg', 0.82)
+    return canvas.toDataURL('image/jpeg', 0.86)
   }
 
   function addToCart(item: Product) {
@@ -129,13 +125,6 @@ export default function ScanCartApp() {
   async function acceptBarcode(raw: string) {
     const clean = String(raw || '').replace(/[^0-9]/g, '')
     if (scanLock.current || clean.length < 8) return
-
-    const now = Date.now()
-    for (const [code, time] of candidates.current) if (now - time > 1800) candidates.current.delete(code)
-    candidates.current.set(clean, now)
-    const repeats = [...candidates.current.entries()].filter(([code, time]) => code === clean && now - time < 1800).length
-    if (repeats < 1) return
-
     scanLock.current = true
     setBarcode(clean)
     setScanning(true)
@@ -153,105 +142,84 @@ export default function ScanCartApp() {
       setAiState(found.mrpSource || found.expirySource ? 'done' : 'unavailable')
       setScanState('Product identified and added to cart.')
       setScreen('product')
-      setScanning(false)
-      scanLock.current = false
     } catch (error) {
       if (!mounted.current) return
+      setScanError(error instanceof Error ? error.message : 'Product analysis failed.')
       setScanning(false)
       scanLock.current = false
-      setScanState('')
-      setScanError(error instanceof Error ? error.message : 'Product analysis failed.')
-      setScreen('scan')
-      window.setTimeout(() => { if (mounted.current && screen === 'scan') void startScanner() }, 200)
+      setScanState('The barcode was read, but product lookup failed. Point at the barcode again.')
+      window.setTimeout(() => { if (mounted.current && screen === 'scan') void startScanner() }, 250)
     }
   }
 
   async function startScanner() {
     if (scanLock.current) return
     stopScanner()
-    candidates.current.clear()
     setCameraReady(false)
     setScanError('')
-    setScanState('Starting camera…')
     setScanning(false)
-
-    const root = scannerRootRef.current
-    if (!root) return
+    setScanState('Starting camera…')
+    const video = videoRef.current
+    if (!video) { setScanError('Scanner camera view is not ready.'); return }
     if (!window.isSecureContext) { setScanError('Camera access requires HTTPS.'); return }
     if (!navigator.mediaDevices?.getUserMedia) { setScanError('This browser does not expose camera access.'); return }
-    if (!window.Quagga) { setScanError('Barcode engine did not load. Reload the page and try again.'); return }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        window.Quagga.init({
-          inputStream: {
-            name: 'ScanCart Camera',
-            type: 'LiveStream',
-            target: root,
-            constraints: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1920, min: 960 },
-              height: { ideal: 1080, min: 540 },
-              frameRate: { ideal: 30, max: 60 },
-            },
-            area: { top: '15%', right: '4%', left: '4%', bottom: '15%' },
-          },
-          locator: { patchSize: 'medium', halfSample: false },
-          numOfWorkers: 0,
-          frequency: 12,
-          locate: true,
-          decoder: {
-            readers: [
-              'ean_reader',
-              'ean_8_reader',
-              'upc_reader',
-              'upc_e_reader',
-              'code_128_reader',
-              'code_39_reader',
-              'i2of5_reader',
-            ],
-            multiple: false,
-          },
-          debug: { drawBoundingBox: false, showFrequency: false, drawScanline: false, showPattern: false },
-        }, (err: any) => err ? reject(err) : resolve())
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920, min: 640 },
+          height: { ideal: 1080, min: 480 },
+          frameRate: { ideal: 30, max: 60 },
+        },
       })
+      if (!mounted.current || screen !== 'scan') {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
+      video.srcObject = stream
+      video.muted = true
+      video.playsInline = true
+      await video.play()
 
-      if (!mounted.current || screen !== 'scan') { stopScanner(); return }
-      scannerRef.current = window.Quagga
-      window.Quagga.start()
+      const track = stream.getVideoTracks()[0]
+      const capabilities = track.getCapabilities?.() as any
+      const advanced: any[] = []
+      if (Array.isArray(capabilities?.focusMode) && capabilities.focusMode.includes('continuous')) advanced.push({ focusMode: 'continuous' })
+      if (typeof capabilities?.zoom?.max === 'number' && capabilities.zoom.max > 1) advanced.push({ zoom: Math.min(2, capabilities.zoom.max) })
+      if (advanced.length && track.applyConstraints) { try { await track.applyConstraints({ advanced }) } catch {} }
+
+      const hints = new Map<DecodeHintType, any>()
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.ITF,
+      ])
+      hints.set(DecodeHintType.TRY_HARDER, true)
+      const reader = new BrowserMultiFormatReader(hints, 250)
+      readerRef.current = reader
+      controlsRef.current = await reader.decodeFromVideoElement(video, (result, error) => {
+        if (result) {
+          const text = result.getText()
+          if (text) void acceptBarcode(text)
+        } else if (error && !String(error.message || '').toLowerCase().includes('not found')) {
+          // Continuous scan errors are expected between successful reads.
+        }
+      })
+      if (!mounted.current) return
       setCameraReady(true)
       setScanState('Point at a barcode. Scanning is automatic.')
-
-      window.Quagga.onDetected((result: any) => {
-        const code = result?.codeResult?.code
-        if (code) void acceptBarcode(code)
-      })
-
-      const video = root.querySelector('video') as HTMLVideoElement | null
-      const track = (video?.srcObject as MediaStream | null)?.getVideoTracks?.()[0]
-      const caps = track?.getCapabilities?.() as any
-      const advanced: any[] = []
-      if (caps?.focusMode?.includes?.('continuous')) advanced.push({ focusMode: 'continuous' })
-      if (typeof caps?.zoom?.max === 'number' && caps.zoom.max > 1) advanced.push({ zoom: Math.min(2, caps.zoom.max) })
-      if (advanced.length && track?.applyConstraints) { try { await track.applyConstraints({ advanced }) } catch {} }
-
-      if (window.ZXingBrowser && video) {
-        try {
-          const Reader = window.ZXingBrowser.BrowserMultiFormatOneDReader || window.ZXingBrowser.BrowserMultiFormatReader
-          if (Reader) {
-            const reader = new Reader(undefined, { delayBetweenScanSuccess: 250, delayBetweenScanAttempts: 80 })
-            zxingRef.current = await reader.decodeFromVideoElement(video, (result: any) => {
-              const text = result?.getText?.() || ''
-              if (text) void acceptBarcode(text)
-            })
-          }
-        } catch {}
-      }
     } catch (error) {
       stopScanner()
       setCameraReady(false)
-      setScanError(`Camera scanner could not start. ${error instanceof Error ? error.message : 'Please allow camera access and try again.'}`)
       setScanState('')
+      const message = error instanceof Error ? error.message : 'Please allow camera access and try again.'
+      setScanError(message)
     }
   }
 
@@ -287,7 +255,7 @@ export default function ScanCartApp() {
       {bottomNav}
     </>}
 
-    {screen === 'scan' && <div className="scanner"><button className="backButton" onClick={() => { stopScanner(); setScreen('home') }} aria-label="Close scanner"><Icon name="close" size={30}/></button><div className="scannerTop"><span>SCAN PRODUCT</span><span className={cameraReady ? 'live' : ''}>{cameraReady ? '● LIVE' : 'CONNECTING'}</span></div><div className="cameraFrame"><div ref={scannerRootRef} className="quaggaRoot"/><div className="corner c1"/><div className="corner c2"/><div className="corner c3"/><div className="corner c4"/><div className="scanLine"/>{scanning && <div className="analyzingOverlay"><span className="spinner"/><b>Analyzing</b><small>Identifying the product and reading package details...</small></div>}</div><h2>{scanning ? 'Analyzing product' : 'Point at a barcode'}</h2><p>{scanning ? 'The barcode was detected. We are now getting the real product data.' : scanState || 'Scanning is automatic.'}</p>{barcode && <div className="barcodeRead">Detected barcode <b>{barcode}</b></div>}{scanError && <div className="scanError">{scanError}</div>}<button className="secondary" onClick={() => void startScanner()} disabled={scanning}><Icon name="refresh" size={17}/> Restart scanner</button>{bottomNav}</div>}
+    {screen === 'scan' && <div className="scanner"><button className="backButton" onClick={() => { stopScanner(); setScreen('home') }} aria-label="Close scanner"><Icon name="close" size={30}/></button><div className="scannerTop"><span>SCAN PRODUCT</span><span className={cameraReady ? 'live' : ''}>{cameraReady ? '● LIVE' : 'CONNECTING'}</span></div><div className="cameraFrame"><video ref={videoRef} autoPlay muted playsInline/><div className="corner c1"/><div className="corner c2"/><div className="corner c3"/><div className="corner c4"/><div className="scanLine"/>{scanning && <div className="analyzingOverlay"><span className="spinner"/><b>Analyzing</b><small>Identifying the product and reading package details...</small></div>}</div><h2>{scanning ? 'Analyzing product' : 'Point at a barcode'}</h2><p>{scanning ? 'The barcode was detected. We are now getting the real product data.' : scanState || 'Scanning is automatic.'}</p>{barcode && <div className="barcodeRead">Detected barcode <b>{barcode}</b></div>}{scanError && <div className="scanError">{scanError}</div>}<button className="secondary" onClick={() => void startScanner()} disabled={scanning}><Icon name="refresh" size={17}/> Restart scanner</button>{bottomNav}</div>}
 
     {screen === 'product' && product && <div className="productScreen"><button className="backText" onClick={() => setScreen('home')}><Icon name="back" size={18}/> Back</button><div className="productHero">{product.image ? <img src={product.image} alt=""/> : <div className="largeIcon">▦</div>}<span className="badge">BARCODE VERIFIED</span><h1>{product.name}</h1><p>{product.brand || 'Brand unavailable'}{product.quantity ? ` · ${product.quantity}` : ''}</p><small>Barcode {product.barcode}</small></div><div className={`aiStatus ${aiState === 'done' ? 'done' : ''}`}><Icon name={aiState === 'done' ? 'check' : 'scan'} size={22}/><span><b>{aiState === 'done' ? 'Package details verified' : 'Product data found'}</b><small>{aiState === 'done' ? 'MRP and expiry came from the package image.' : product.source || 'Connected product database'}</small></span></div><div className="detailGrid"><div><small>MRP</small><b>{product.mrp != null ? `₹${product.mrp}` : 'Not verified'}</b><em>{product.mrpSource || 'No printed price read'}</em></div><div><small>EXPIRY</small><b>{product.expiry || 'Not verified'}</b><em>{product.expirySource || 'No printed date read'}</em></div><div><small>CALORIES</small><b>{product.calories != null ? `${product.calories} kcal` : 'N/A'}</b><em>{product.serving || 'Per serving / database value'}</em></div><div><small>PROTEIN</small><b>{product.protein != null ? `${product.protein} g` : 'N/A'}</b><em>Nutrition database</em></div></div><div className="sourceNote"><b>Data sources.</b> Barcode identity comes from a product database when available. MRP and expiry are only shown when they are read from the package image. ScanCart does not invent a price.</div><button className="primary" onClick={() => setScreen('cart')}>View cart</button></div>}
 
