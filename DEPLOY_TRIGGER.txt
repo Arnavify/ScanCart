@@ -1,5 +1,5 @@
 Deployment trigger for Cloudflare Workers Builds.
-Fresh build trigger: 2026-08-22T12:00:00Z
-Current scanner uses a single ZXing decoder over the browser camera stream.
+Fresh build trigger: 2026-08-22T15:00:00Z
+Current scanner uses the browser camera with ZXing barcode decoding and sends the detected barcode plus captured package frame to /api/resolve.
 The Vite entrypoint is src/main.tsx and the production build outputs dist/.
-This commit intentionally retriggers the connected Cloudflare build from the current main branch.
+This commit intentionally retriggers the connected Cloudflare build from the current main branch after the scanner and build configuration fixes.
