@@ -1,49 +1,48 @@
 # ScanCart
 
-A barcode-first shopping and nutrition assistant built with React + Vite + Tailwind CSS v4.
+Real-world barcode product scanner with package-level MRP and expiry verification.
 
-## Features
+## How it works
 
-- Barcode scanning with staged detection states
-- Product identification with honest data attribution (source + confidence badges)
-- AI product analysis using OCR/AI when necessary
-- Expiry date OCR flow
-- Cart management with quantity steppers
-- Checkout with payment methods
-- Payment success screen
-- Scan history
-- Comprehensive error states
+1. Open Scan.
+2. The rear camera starts automatically.
+3. ZXing continuously detects EAN/UPC barcodes.
+4. The barcode is sent to the ScanCart Worker.
+5. The Worker resolves the product through Open Food Facts.
+6. A captured package frame is sent to Gemma 4 31B for printed MRP, expiry and quantity extraction.
+7. Missing values remain unavailable. ScanCart never invents an MRP or expiry date.
 
-## Design
+## AI configuration
 
-- Black background (#0a0a0a), dark charcoal cards (#161618/#111113)
-- Orange accent (#ef602a)
-- SF Pro typography
-- Minimal line icons
+The AI verifier runs server-side so the API key is never shipped to the browser.
 
-## Prerequisites
-
-- Node.js 20+
-- pnpm
-
-## Installation
+For Cloudflare Workers, add the secret:
 
 ```bash
-pnpm install
+npx wrangler secret put GEMINI_API_KEY
 ```
 
-## Running
+Then redeploy the Worker.
+
+The Worker uses the Gemini API with `gemma-4-31b-it` for package image inspection.
+
+## Important data rule
+
+A barcode identifies a product. It does not reliably encode the printed MRP or the expiry date of the individual package. ScanCart therefore does not treat a generic database price as MRP. MRP and expiry are only shown when they are read from the physical package by the AI verifier.
+
+Open Food Facts supplies product identity and nutrition data. Database coverage is not universal, so an unknown barcode is reported as unknown rather than mapped to a fake product.
+
+## Deployment
+
+Build:
 
 ```bash
-pnpm dev
+pnpm install --frozen-lockfile
+pnpm run build
 ```
 
-The app runs on http://localhost:5173 by default.
+Deploy the Cloudflare Worker using the existing `wrangler.jsonc` configuration.
 
-## Project Structure
+## Camera requirements
 
-- `src/App.tsx` — Primary application component with all screens
-- `src/data.ts` — Typed mock product database
-- `src/icons.tsx` — Cohesive icon set
-- `src/index.css` — Global CSS and Tailwind v4 import
-- `src/main.tsx` — React entrypoint
+Camera access requires HTTPS or localhost. On iPhone Safari and Android Chrome, allow camera permission for the deployed site.
