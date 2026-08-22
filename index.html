@@ -10,8 +10,97 @@
     <meta property="og:type" content="website" />
     <title>ScanCart, Scan as you shop</title>
     <link rel="stylesheet" href="/src/scanner.css" />
-    <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.12.1/dist/quagga.min.js"></script>
     <script src="https://unpkg.com/@zxing/browser@0.2.1"></script>
+    <script>
+      (() => {
+        let video = null
+        let stream = null
+        let controls = null
+        let detectionHandler = null
+
+        const scannerAdapter = {
+          init(config, callback) {
+            const target = config?.inputStream?.target
+            if (!target || !navigator.mediaDevices?.getUserMedia) {
+              callback(new Error('Camera access is not available in this browser.'))
+              return
+            }
+
+            target.innerHTML = ''
+            video = document.createElement('video')
+            video.autoplay = true
+            video.muted = true
+            video.playsInline = true
+            video.setAttribute('playsinline', '')
+            video.setAttribute('webkit-playsinline', '')
+            video.style.width = '100%'
+            video.style.height = '100%'
+            video.style.objectFit = 'cover'
+            target.appendChild(video)
+
+            navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1920, min: 640 },
+                height: { ideal: 1080, min: 480 },
+                frameRate: { ideal: 30, max: 60 },
+              },
+            }).then(async media => {
+              stream = media
+              video.srcObject = media
+              await video.play().catch(() => {})
+              const track = media.getVideoTracks()[0]
+              const caps = track?.getCapabilities?.() || {}
+              const advanced = []
+              if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) advanced.push({ focusMode: 'continuous' })
+              if (typeof caps.zoom?.max === 'number' && caps.zoom.max > 1) advanced.push({ zoom: Math.min(2, caps.zoom.max) })
+              if (advanced.length && track.applyConstraints) await track.applyConstraints({ advanced }).catch(() => {})
+              callback(null)
+            }).catch(error => {
+              video?.remove()
+              video = null
+              callback(error)
+            })
+          },
+
+          start() {},
+
+          onDetected(handler) {
+            detectionHandler = handler
+            if (!video || !window.ZXingBrowser) return
+
+            try {
+              const Reader = window.ZXingBrowser.BrowserMultiFormatOneDReader || window.ZXingBrowser.BrowserMultiFormatReader
+              if (!Reader) return
+              const reader = new Reader(undefined, { delayBetweenScanSuccess: 250, delayBetweenScanAttempts: 80 })
+              reader.decodeFromVideoElement(video, result => {
+                const text = result?.getText?.() || ''
+                if (text && detectionHandler) detectionHandler({ codeResult: { code: text } })
+              }).then(value => { controls = value }).catch(() => {})
+            } catch (_) {}
+          },
+
+          stop() {
+            try { controls?.stop?.() } catch (_) {}
+            controls = null
+            if (stream) {
+              stream.getTracks().forEach(track => track.stop())
+              stream = null
+            }
+            if (video) {
+              video.pause()
+              video.srcObject = null
+              video.remove()
+              video = null
+            }
+            detectionHandler = null
+          },
+        }
+
+        window.Quagga = scannerAdapter
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
