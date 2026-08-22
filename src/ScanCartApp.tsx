@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserMultiFormatReader } from '@zxing/browser'
-import { BarcodeFormat, DecodeHintType } from '@zxing/library'
 
 type Product = {
   id: string
@@ -45,6 +44,35 @@ function stored<T>(key: string, fallback: T): T {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) as T : fallback } catch { return fallback }
 }
 
+function cleanBarcode(value: unknown): string {
+  return String(value ?? '').replace(/[^0-9]/g, '')
+}
+
+function validCheckDigit(value: string): boolean {
+  if (/^\d{13}$/.test(value)) {
+    let sum = 0
+    for (let i = 0; i < 12; i++) sum += Number(value[i]) * (i % 2 ? 3 : 1)
+    return (10 - (sum % 10)) % 10 === Number(value[12])
+  }
+  if (/^\d{12}$/.test(value)) {
+    let sum = 0
+    for (let i = 0; i < 11; i++) sum += Number(value[i]) * (i % 2 ? 1 : 3)
+    return (10 - (sum % 10)) % 10 === Number(value[11])
+  }
+  if (/^\d{8}$/.test(value)) {
+    let sum = 0
+    for (let i = 0; i < 7; i++) sum += Number(value[i]) * (i % 2 ? 3 : 1)
+    return (10 - (sum % 10)) % 10 === Number(value[7])
+  }
+  return false
+}
+
+function normalizeBarcode(value: unknown): string {
+  const clean = cleanBarcode(value)
+  if (validCheckDigit(clean)) return clean
+  return clean.length >= 8 && clean.length <= 14 ? clean : ''
+}
+
 async function resolveProduct(barcode: string, image: string): Promise<Product> {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 30000)
@@ -81,6 +109,8 @@ export default function ScanCartApp() {
   const readerRef = useRef<BrowserMultiFormatReader | null>(null)
   const controlsRef = useRef<{ stop: () => void } | null>(null)
   const scanLock = useRef(false)
+  const aiScanBusy = useRef(false)
+  const aiTimerRef = useRef<number | null>(null)
   const mounted = useRef(true)
 
   useEffect(() => () => { mounted.current = false; stopScanner() }, [])
@@ -92,9 +122,13 @@ export default function ScanCartApp() {
   const items = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart])
 
   function stopScanner() {
+    if (aiTimerRef.current !== null) {
+      window.clearTimeout(aiTimerRef.current)
+      aiTimerRef.current = null
+    }
     try { controlsRef.current?.stop?.() } catch {}
     controlsRef.current = null
-    readerRef.current?.reset?.()
+    try { readerRef.current?.reset?.() } catch {}
     readerRef.current = null
     const video = videoRef.current
     const stream = video?.srcObject as MediaStream | null
@@ -107,12 +141,33 @@ export default function ScanCartApp() {
     const video = videoRef.current
     if (!video?.videoWidth || !video.videoHeight) return ''
     const canvas = document.createElement('canvas')
-    const scale = Math.min(1, 1400 / video.videoWidth)
+    const scale = Math.min(1, 1200 / video.videoWidth)
     canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
     canvas.height = Math.max(1, Math.round(video.videoHeight * scale))
     const ctx = canvas.getContext('2d')
     if (!ctx) return ''
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', 0.82)
+  }
+
+  function captureBarcodeFrame(): string {
+    const video = videoRef.current
+    if (!video?.videoWidth || !video.videoHeight) return ''
+    const canvas = document.createElement('canvas')
+    const scale = Math.min(1, 1100 / video.videoWidth)
+    const sw = video.videoWidth * 0.92
+    const sh = video.videoHeight * 0.72
+    const sx = (video.videoWidth - sw) / 2
+    const sy = (video.videoHeight - sh) / 2
+    canvas.width = Math.max(640, Math.round(sw * scale))
+    canvas.height = Math.max(420, Math.round(sh * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return ''
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
     return canvas.toDataURL('image/jpeg', 0.86)
   }
 
@@ -122,8 +177,41 @@ export default function ScanCartApp() {
       : [...current, { ...item, qty: 1 }])
   }
 
+  async function aiBarcodeFallback() {
+    if (scanLock.current || aiScanBusy.current || !cameraReady || screen !== 'scan') return
+    const image = captureBarcodeFrame()
+    if (!image) return
+    aiScanBusy.current = true
+    try {
+      setScanState('Analyzing the barcode…')
+      const response = await fetch('/api/barcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ image }),
+      })
+      const data = await response.json().catch(() => null)
+      const candidate = normalizeBarcode(data?.barcode)
+      if (response.ok && data?.found && candidate) {
+        void acceptBarcode(candidate)
+        return
+      }
+    } catch {
+      // The local scanner remains the primary decoder.
+    } finally {
+      aiScanBusy.current = false
+    }
+    if (!scanLock.current && mounted.current && screen === 'scan') {
+      aiTimerRef.current = window.setTimeout(aiBarcodeFallback, 1800)
+    }
+  }
+
+  function scheduleAIBarcodeFallback() {
+    if (aiTimerRef.current !== null) window.clearTimeout(aiTimerRef.current)
+    aiTimerRef.current = window.setTimeout(aiBarcodeFallback, 1800)
+  }
+
   async function acceptBarcode(raw: string) {
-    const clean = String(raw || '').replace(/[^0-9]/g, '')
+    const clean = normalizeBarcode(raw)
     if (scanLock.current || clean.length < 8) return
     scanLock.current = true
     setBarcode(clean)
@@ -147,8 +235,8 @@ export default function ScanCartApp() {
       setScanError(error instanceof Error ? error.message : 'Product analysis failed.')
       setScanning(false)
       scanLock.current = false
-      setScanState('The barcode was read, but product lookup failed. Point at the barcode again.')
-      window.setTimeout(() => { if (mounted.current && screen === 'scan') void startScanner() }, 250)
+      setScanState('Barcode read. Product lookup failed, retrying…')
+      window.setTimeout(() => { if (mounted.current && screen === 'scan') { void startScanner() } }, 250)
     }
   }
 
@@ -165,55 +253,28 @@ export default function ScanCartApp() {
     if (!navigator.mediaDevices?.getUserMedia) { setScanError('This browser does not expose camera access.'); return }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920, min: 640 },
-          height: { ideal: 1080, min: 480 },
-          frameRate: { ideal: 30, max: 60 },
-        },
-      })
-      if (!mounted.current || screen !== 'scan') {
-        stream.getTracks().forEach(track => track.stop())
-        return
-      }
-      video.srcObject = stream
-      video.muted = true
-      video.playsInline = true
-      await video.play()
-
-      const track = stream.getVideoTracks()[0]
-      const capabilities = track.getCapabilities?.() as any
-      const advanced: any[] = []
-      if (Array.isArray(capabilities?.focusMode) && capabilities.focusMode.includes('continuous')) advanced.push({ focusMode: 'continuous' })
-      if (typeof capabilities?.zoom?.max === 'number' && capabilities.zoom.max > 1) advanced.push({ zoom: Math.min(2, capabilities.zoom.max) })
-      if (advanced.length && track.applyConstraints) { try { await track.applyConstraints({ advanced }) } catch {} }
-
-      const hints = new Map<DecodeHintType, any>()
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-        BarcodeFormat.EAN_13,
-        BarcodeFormat.EAN_8,
-        BarcodeFormat.UPC_A,
-        BarcodeFormat.UPC_E,
-        BarcodeFormat.CODE_128,
-        BarcodeFormat.CODE_39,
-        BarcodeFormat.ITF,
-      ])
-      hints.set(DecodeHintType.TRY_HARDER, true)
-      const reader = new BrowserMultiFormatReader(hints, 250)
+      const reader = new BrowserMultiFormatReader()
       readerRef.current = reader
-      controlsRef.current = await reader.decodeFromVideoElement(video, (result, error) => {
-        if (result) {
-          const text = result.getText()
-          if (text) void acceptBarcode(text)
-        } else if (error && !String(error.message || '').toLowerCase().includes('not found')) {
-          // Continuous scan errors are expected between successful reads.
-        }
-      })
-      if (!mounted.current) return
+      controlsRef.current = await reader.decodeFromConstraints(
+        {
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920, min: 640 },
+            height: { ideal: 1080, min: 480 },
+            frameRate: { ideal: 30, max: 60 },
+          },
+        },
+        video,
+        (result) => {
+          const value = normalizeBarcode(result?.getText?.())
+          if (value) void acceptBarcode(value)
+        },
+      )
+      if (!mounted.current || screen !== 'scan') return
       setCameraReady(true)
       setScanState('Point at a barcode. Scanning is automatic.')
+      scheduleAIBarcodeFallback()
     } catch (error) {
       stopScanner()
       setCameraReady(false)
@@ -233,6 +294,7 @@ export default function ScanCartApp() {
     scanLock.current = false
     setBarcode('')
     setAiState('idle')
+    setScanError('')
     setScreen('scan')
   }
 
