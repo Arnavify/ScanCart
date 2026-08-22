@@ -181,21 +181,42 @@ export default function App() {
       try {
         if (!window.isSecureContext) throw new Error('Camera access requires HTTPS.')
         if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is unavailable in this browser.')
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false })
-        if (cancelled || !videoRef.current) { stream.getTracks().forEach(t => t.stop()); return }
-        const video = videoRef.current
-        video.srcObject = stream
-        await video.play()
-        setCameraReady(true)
-        setLookupState('Point the camera at a product barcode. Scanning is automatic.')
+
+        setLookupState('Starting automatic barcode scanner…')
         const zxing = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/+esm') as any
         if (cancelled || !videoRef.current) return
-        const reader = new zxing.BrowserMultiFormatReader()
-        const controls = await reader.decodeFromConstraints({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }, video, (result: any) => {
-          if (result) void handleDetected(result.getText())
+
+        const video = videoRef.current
+        const Reader = zxing.BrowserMultiFormatOneDReader || zxing.BrowserMultiFormatReader
+        if (!Reader) throw new Error('Barcode scanner library failed to load.')
+        const reader = new Reader(undefined, { delayBetweenScanSuccess: 700, delayBetweenScanAttempts: 120 })
+
+        const controls = await reader.decodeFromVideoDevice(undefined, video, (result: any) => {
+          if (!result || scanLock.current) return
+          const text = result.getText?.() || ''
+          if (text) void handleDetected(text)
         })
-        if (cancelled) controls.stop()
-        else scannerRef.current = controls
+
+        if (cancelled) {
+          controls.stop()
+          return
+        }
+
+        scannerRef.current = controls
+        setCameraReady(true)
+        setLookupState('Point the camera at a product barcode. Scanning is automatic.')
+
+        const stream = video.srcObject as MediaStream | null
+        const track = stream?.getVideoTracks?.()[0]
+        const capabilities = track?.getCapabilities?.() as any
+        const advanced: any[] = []
+        if (capabilities?.focusMode?.includes?.('continuous')) advanced.push({ focusMode: 'continuous' })
+        if (typeof capabilities?.zoom?.max === 'number' && capabilities.zoom.max > 1) {
+          advanced.push({ zoom: Math.min(2, capabilities.zoom.max) })
+        }
+        if (advanced.length && track?.applyConstraints) {
+          try { await track.applyConstraints({ advanced }) } catch { /* camera may not support these controls */ }
+        }
       } catch (error) {
         if (cancelled) return
         const message = error instanceof Error ? error.message : 'Could not start scanner.'
@@ -205,7 +226,14 @@ export default function App() {
       }
     }
     void boot()
-    return () => { cancelled = true; scannerRef.current?.stop(); scannerRef.current = null }
+    return () => {
+      cancelled = true
+      scannerRef.current?.stop()
+      scannerRef.current = null
+      const stream = videoRef.current?.srcObject as MediaStream | null
+      stream?.getTracks().forEach(track => track.stop())
+      if (videoRef.current) videoRef.current.srcObject = null
+    }
   }, [screen])
 
   const changeQty = (id: string, delta: number) => setCart(c => c.flatMap(i => i.id === id ? [{ ...i, qty: i.qty + delta }].filter(x => x.qty > 0) : [i]))
