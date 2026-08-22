@@ -1,5 +1,5 @@
 Deployment trigger for Cloudflare Workers Builds.
-Fresh build trigger: 2026-08-22T15:00:00Z
-Current scanner uses the browser camera with ZXing barcode decoding and sends the detected barcode plus captured package frame to /api/resolve.
+Fresh build trigger: 2026-08-22T14:30:00Z
+Current scanner uses the browser camera with native barcode detection when available and Cloudflare Workers AI Gemma 4 vision OCR as the fallback. The backend reads printed barcode digits, resolves the code against Open Food Facts, and uses package vision only for printed MRP, expiry, and nutrition details.
 The Vite entrypoint is src/main.tsx and the production build outputs dist/.
-This commit intentionally retriggers the connected Cloudflare build from the current main branch after the scanner and build configuration fixes.
+This commit intentionally retriggers the connected Cloudflare build from the current main branch after the Workers AI vision input fix.
