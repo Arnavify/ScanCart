@@ -16,6 +16,18 @@ function cleanJson(text: string) {
   return (fenced ? fenced[1] : text).trim()
 }
 
+function extractInteractionText(raw: any) {
+  if (typeof raw?.output_text === 'string') return raw.output_text.trim()
+  const chunks: string[] = []
+  for (const step of Array.isArray(raw?.steps) ? raw.steps : []) {
+    if (step?.type !== 'model_output') continue
+    for (const content of Array.isArray(step?.content) ? step.content : []) {
+      if (content?.type === 'text' && typeof content.text === 'string') chunks.push(content.text)
+    }
+  }
+  return chunks.join('\n').trim()
+}
+
 function normaliseBarcode(value: string) {
   return String(value || '').replace(/[^0-9]/g, '')
 }
@@ -59,7 +71,7 @@ async function lookupOpenFoodFacts(barcode: string) {
 async function analyzePackage(env: Env, image: string, barcode: string) {
   if (!env.GEMINI_API_KEY) return null
   const media = normaliseImage(image)
-  const prompt = `You are ScanCart's real-world package verifier. The barcode ${barcode} has already been read by a barcode scanner. Inspect ONLY the supplied physical product image. Return ONLY valid JSON with these keys: name, brand, mrp, mrpText, expiry, expiryText, quantity, calories, protein, confidence. Rules: name and brand must be returned only if visibly readable on the package. MRP means the printed Maximum Retail Price in Indian rupees, not an online or store price. Read MRP only when the printed price is visible. Never calculate or infer MRP. Expiry may be EXP, USE BY, BEST BEFORE, or an exact printed date. If only a duration such as BEST BEFORE 6 MONTHS FROM PACKAGING is visible, put the exact text in expiryText and set expiry to null. calories and protein should only be returned when clearly printed on the package, otherwise null. confidence is 0 to 1 and reflects the clarity of the information actually read. Never invent missing information.`
+  const prompt = `You are ScanCart's real-world package verifier. The barcode ${barcode} has already been read by a barcode scanner. Inspect ONLY the supplied physical product image. Return ONLY valid JSON with these keys: name, brand, mrp, mrpText, expiry, expiryText, quantity, calories, protein, confidence. Rules: name and brand must be returned only if visibly readable on the package. MRP means the printed Maximum Retail Price in Indian rupees, not an online or store price. Read MRP only when the printed price is visible. Never calculate or infer MRP. mrpText must contain the exact visible MRP text when mrp is returned. Expiry may be EXP, USE BY, BEST BEFORE, or an exact printed date. If only a duration such as BEST BEFORE 6 MONTHS FROM PACKAGING is visible, put the exact text in expiryText and set expiry to null. calories and protein should only be returned when clearly printed on the package, otherwise null. confidence is 0 to 1 and reflects the clarity of the information actually read. Never invent missing information.`
   const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
     method: 'POST',
     headers: {
@@ -77,7 +89,7 @@ async function analyzePackage(env: Env, image: string, barcode: string) {
   })
   if (!upstream.ok) return null
   const raw = await upstream.json() as any
-  const text = String(raw.output_text || '').trim()
+  const text = extractInteractionText(raw)
   if (!text) return null
   try { return JSON.parse(cleanJson(text)) as any } catch { return null }
 }
@@ -103,7 +115,8 @@ function mergeProduct(database: any, ai: any, barcode: string) {
   const confidence = Number(ai?.confidence)
   if (Number.isFinite(confidence)) product.confidence = Math.max(0, Math.min(1, confidence))
   const mrp = Number(ai?.mrp)
-  if (Number.isFinite(mrp) && mrp >= 0) {
+  const mrpText = typeof ai?.mrpText === 'string' ? ai.mrpText.trim() : ''
+  if (Number.isFinite(mrp) && mrp >= 0 && mrpText) {
     product.mrp = mrp
     product.mrpSource = 'Package AI verification'
   }
@@ -162,7 +175,8 @@ export default {
         const confidence = Number(ai.confidence)
         if (Number.isFinite(confidence)) data.confidence = Math.max(0, Math.min(1, confidence))
         const mrp = Number(ai.mrp)
-        if (Number.isFinite(mrp) && mrp >= 0) { data.mrp = mrp; data.mrpSource = 'Package AI verification' }
+        const mrpText = typeof ai.mrpText === 'string' ? ai.mrpText.trim() : ''
+        if (Number.isFinite(mrp) && mrp >= 0 && mrpText) { data.mrp = mrp; data.mrpSource = 'Package AI verification' }
         if (typeof ai.expiry === 'string' && ai.expiry.trim()) { data.expiry = ai.expiry.trim(); data.expirySource = 'Package AI verification' }
         else if (typeof ai.expiryText === 'string' && ai.expiryText.trim()) { data.expiry = ai.expiryText.trim(); data.expirySource = 'Package AI verification' }
         if (typeof ai.quantity === 'string' && ai.quantity.trim()) data.quantity = ai.quantity.trim()
