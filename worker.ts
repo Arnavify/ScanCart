@@ -4,6 +4,7 @@ type Env = {
   AI?: { run: (model: string, input: any) => Promise<any> }
 }
 
+const AI_MODEL = '@cf/google/gemma-4-26b-a4b-it'
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -44,6 +45,9 @@ function extractGeminiText(raw: any) {
 function extractCloudflareText(raw: any) {
   if (typeof raw?.response === 'string') return raw.response.trim()
   if (typeof raw?.result?.response === 'string') return raw.result.response.trim()
+  const content = raw?.choices?.[0]?.message?.content
+  if (typeof content === 'string') return content.trim()
+  if (Array.isArray(content)) return content.filter((x: any) => typeof x?.text === 'string').map((x: any) => x.text).join('\n').trim()
   if (typeof raw === 'string') return raw.trim()
   return ''
 }
@@ -88,12 +92,23 @@ function normaliseImage(image: string) {
 
 async function cloudflareImageJson(env: Env, image: string, prompt: string) {
   if (!env.AI) return null
+  const media = normaliseImage(image)
+  const dataUrl = `data:${media.mimeType};base64,${media.data}`
   try {
-    // Workers AI vision models accept the image as a top-level `image` input.
-    // Sending it as an OpenAI-style content block does not work with env.AI.run().
-    const result = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
-      prompt,
-      image,
+    // Gemma 4 vision uses the chat-style multimodal message format. The previous
+    // implementation sent `image` as a top-level field, which is not the documented
+    // multimodal input for this model and caused the OCR request to fail silently.
+    const result = await env.AI.run(AI_MODEL, {
+      messages: [
+        { role: 'system', content: 'You are a precise OCR system. Never invent digits or product facts.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
       max_tokens: 700,
       temperature: 0,
     })
@@ -109,26 +124,28 @@ async function geminiImageJson(env: Env, image: string, prompt: string, model = 
   if (cloudflare) return cloudflare
   if (!env.GEMINI_API_KEY) return null
 
-  const media = normaliseImage(image)
-  const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ parts: [{ inlineData: { mimeType: media.mimeType, data: media.data } }, { text: prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-    }),
-  })
-  if (!upstream.ok) return null
-  const raw = await upstream.json() as any
-  return parseJson(extractGeminiText(raw))
+  try {
+    const media = normaliseImage(image)
+    const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+      body: JSON.stringify({
+        contents: [{ parts: [{ inlineData: { mimeType: media.mimeType, data: media.data } }, { text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+      }),
+    })
+    if (!upstream.ok) return null
+    const raw = await upstream.json() as any
+    return parseJson(extractGeminiText(raw))
+  } catch {
+    return null
+  }
 }
 
 async function lookupOpenFoodFacts(barcode: string) {
   const fields = ['code', 'product_name', 'product_name_en', 'generic_name', 'brands', 'categories', 'quantity', 'image_front_url', 'nutriments', 'nutrition_grades', 'nutriscore_data', 'serving_size', 'product_type'].join(',')
   const url = `https://world.openfoodfacts.org/api/v3/product/${barcode}.json?product_type=all&fields=${encodeURIComponent(fields)}`
-  const upstream = await fetch(url, {
-    headers: { Accept: 'application/json', 'User-Agent': 'ScanCart/2.2 (real-world barcode shopping app)' },
-  } as RequestInit)
+  const upstream = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'ScanCart/2.3 (real-world barcode shopping app)' } } as RequestInit)
   if (!upstream.ok) return null
   const raw = await upstream.json() as any
   if (!raw.product) return null
@@ -153,7 +170,7 @@ async function lookupOpenFoodFacts(barcode: string) {
 }
 
 async function analyzeBarcode(env: Env, image: string) {
-  return geminiImageJson(env, image, `Read the 1D retail product barcode in this image. Focus on the printed digits directly below the bars. Return ONLY JSON in this exact shape: {"barcode":"","confidence":0}. Read every visible digit left to right. Do not guess or invent missing digits. confidence is 0 to 1. If the complete number cannot be read confidently, return an empty barcode. Prefer EAN-13, EAN-8, UPC-A, or GTIN-14.`)
+  return geminiImageJson(env, image, 'Read the 1D retail product barcode in this image. Focus on the printed digits directly below the bars. Return ONLY JSON in this exact shape: {"barcode":"","confidence":0}. Read every visible digit left to right. Do not guess or invent missing digits. confidence is 0 to 1. If the complete number cannot be read confidently, return an empty barcode. Prefer EAN-13, EAN-8, UPC-A, or GTIN-14.')
 }
 
 async function analyzePackage(env: Env, image: string, barcode: string) {
@@ -183,17 +200,9 @@ function mergeProduct(database: any, ai: any, barcode: string) {
   if (Number.isFinite(confidence)) product.confidence = Math.max(0, Math.min(1, confidence))
   const mrp = Number(ai?.mrp)
   const mrpText = typeof ai?.mrpText === 'string' ? ai.mrpText.trim() : ''
-  if (Number.isFinite(mrp) && mrp >= 0 && mrpText) {
-    product.mrp = mrp
-    product.mrpSource = 'AI package verification'
-  }
-  if (typeof ai?.expiry === 'string' && ai.expiry.trim()) {
-    product.expiry = ai.expiry.trim()
-    product.expirySource = 'AI package verification'
-  } else if (typeof ai?.expiryText === 'string' && ai.expiryText.trim()) {
-    product.expiry = ai.expiryText.trim()
-    product.expirySource = 'AI package verification'
-  }
+  if (Number.isFinite(mrp) && mrp >= 0 && mrpText) { product.mrp = mrp; product.mrpSource = 'AI package verification' }
+  if (typeof ai?.expiry === 'string' && ai.expiry.trim()) { product.expiry = ai.expiry.trim(); product.expirySource = 'AI package verification' }
+  else if (typeof ai?.expiryText === 'string' && ai.expiryText.trim()) { product.expiry = ai.expiryText.trim(); product.expirySource = 'AI package verification' }
   if (product.calories == null && Number.isFinite(Number(ai?.calories))) product.calories = Number(ai.calories)
   if (product.protein == null && Number.isFinite(Number(ai?.protein))) product.protein = Number(ai.protein)
   return product
@@ -205,7 +214,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors })
 
     if (request.method === 'GET' && url.pathname === '/api/health') {
-      return json({ ok: true, ai: Boolean(env.AI || env.GEMINI_API_KEY), cloudflareAI: Boolean(env.AI), gemini: Boolean(env.GEMINI_API_KEY), model: env.AI ? '@cf/google/gemma-4-26b-a4b-it' : null })
+      return json({ ok: true, ai: Boolean(env.AI || env.GEMINI_API_KEY), cloudflareAI: Boolean(env.AI), gemini: Boolean(env.GEMINI_API_KEY), model: env.AI ? AI_MODEL : null })
     }
 
     const productMatch = url.pathname.match(/^\/api\/product\/([^/]+)$/)
@@ -216,9 +225,7 @@ export default {
         const product = await lookupOpenFoodFacts(barcode)
         if (!product) return json({ found: false, barcode, message: 'No product record was found for this barcode.' }, 404)
         return json({ found: true, product }, 200, { 'Cache-Control': 'public, max-age=300' })
-      } catch {
-        return json({ found: false, message: 'Product database is temporarily unavailable.' }, 502)
-      }
+      } catch { return json({ found: false, message: 'Product database is temporarily unavailable.' }, 502) }
     }
 
     if (request.method === 'POST' && url.pathname === '/api/barcode') {
@@ -231,8 +238,8 @@ export default {
           return json({ found: false, configured: Boolean(env.AI || env.GEMINI_API_KEY), message: env.AI || env.GEMINI_API_KEY ? 'The AI could not read the complete barcode. Move the camera closer and keep the bars sharp.' : 'No AI vision backend is configured.' }, 503)
         }
         return json({ found: true, barcode, verified: validBarcode(barcode), confidence: Number(ai?.confidence) || undefined })
-      } catch {
-        return json({ found: false, message: 'AI barcode analysis failed.' }, 422)
+      } catch (error) {
+        return json({ found: false, message: error instanceof Error ? error.message : 'AI barcode analysis failed.' }, 422)
       }
     }
 
@@ -246,9 +253,7 @@ export default {
         const product = mergeProduct(database, ai, barcode)
         if (!product) return json({ found: false, barcode, message: 'The barcode was read, but no verified product identity was available. The package image was not clear enough to identify it.' }, 404)
         return json({ found: true, product })
-      } catch {
-        return json({ found: false, message: 'Product analysis failed. Please scan the barcode again.' }, 422)
-      }
+      } catch { return json({ found: false, message: 'Product analysis failed. Please scan the barcode again.' }, 422) }
     }
 
     if (request.method === 'POST' && url.pathname === '/api/inspect') {
@@ -267,9 +272,7 @@ export default {
         else if (typeof ai.expiryText === 'string' && ai.expiryText.trim()) { data.expiry = ai.expiryText.trim(); data.expirySource = 'AI package verification' }
         if (typeof ai.quantity === 'string' && ai.quantity.trim()) data.quantity = ai.quantity.trim()
         return json({ found: true, data })
-      } catch {
-        return json({ found: false, message: 'AI could not confidently read the package.' }, 422)
-      }
+      } catch { return json({ found: false, message: 'AI could not confidently read the package.' }, 422) }
     }
 
     return assets(request, env)
