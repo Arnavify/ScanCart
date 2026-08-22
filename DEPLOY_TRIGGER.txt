@@ -1,3 +1,4 @@
 Deployment trigger for Cloudflare Workers Builds.
-Fresh build trigger: 2026-08-22T13:20:00+05:30
+Fresh build trigger: 2026-08-22T16:30:00+05:30
 The Vite entrypoint is src/main.tsx and the production build outputs dist/.
+This commit intentionally retriggers the connected Cloudflare build from the current main branch.
