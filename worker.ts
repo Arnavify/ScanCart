@@ -4,7 +4,7 @@ const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Cache-Control': 'public, max-age=300',
+  'Cache-Control': 'no-store',
 }
 
 function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
@@ -13,13 +13,110 @@ function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
 
 function cleanJson(text: string) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
-  return fenced ? fenced[1] : text.trim()
+  return (fenced ? fenced[1] : text).trim()
+}
+
+function normaliseBarcode(value: string) {
+  return String(value || '').replace(/[^0-9]/g, '')
 }
 
 function normaliseImage(image: string) {
-  const match = image.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,(.+)$/i)
+  const match = String(image || '').match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,(.+)$/i)
   if (!match) throw new Error('Invalid image payload.')
   return { mimeType: match[1].toLowerCase().replace('jpg', 'jpeg'), data: match[2] }
+}
+
+async function lookupOpenFoodFacts(barcode: string) {
+  const fields = ['code', 'product_name', 'product_name_en', 'generic_name', 'brands', 'categories', 'quantity', 'image_front_url', 'nutriments', 'nutrition_grades', 'nutriscore_data', 'serving_size', 'product_type'].join(',')
+  const url = `https://world.openfoodfacts.org/api/v3/product/${barcode}.json?product_type=all&fields=${encodeURIComponent(fields)}`
+  const upstream = await fetch(url, {
+    headers: { Accept: 'application/json', 'User-Agent': 'ScanCart/2.0 (real-world barcode shopping app)' },
+    cf: { cacheTtl: 300, cacheEverything: true },
+  } as RequestInit)
+  if (!upstream.ok) return null
+  const raw = await upstream.json() as any
+  if (raw.status !== 1 || !raw.product) return null
+  const p = raw.product
+  const n = p.nutriments || {}
+  const calories = Number(n['energy-kcal_serving'] ?? n['energy-kcal_100g'])
+  const protein = Number(n.proteins_serving ?? n.proteins_100g)
+  return {
+    id: String(p.code || barcode),
+    name: String(p.product_name || p.product_name_en || p.generic_name || '').trim() || '',
+    brand: String(p.brands || '').split(',')[0].trim() || undefined,
+    calories: Number.isFinite(calories) ? calories : undefined,
+    protein: Number.isFinite(protein) ? protein : undefined,
+    currency: 'INR',
+    category: String(p.categories || '').split(',')[0].trim() || undefined,
+    serving: String(p.serving_size || '').trim() || undefined,
+    image: String(p.image_front_url || '').trim() || undefined,
+    quantity: String(p.quantity || '').trim() || undefined,
+    nutriscore: String(p.nutrition_grades || p.nutriscore_data?.grade || '').trim() || undefined,
+    source: 'Open Food Facts',
+  }
+}
+
+async function analyzePackage(env: Env, image: string, barcode: string) {
+  if (!env.GEMINI_API_KEY) return null
+  const media = normaliseImage(image)
+  const prompt = `You are ScanCart's real-world package verifier. The barcode ${barcode} has already been read by a barcode scanner. Inspect ONLY the supplied physical product image. Return ONLY valid JSON with these keys: name, brand, mrp, mrpText, expiry, expiryText, quantity, calories, protein, confidence. Rules: name and brand must be returned only if visibly readable on the package. MRP means the printed Maximum Retail Price in Indian rupees, not an online or store price. Read MRP only when the printed price is visible. Never calculate or infer MRP. Expiry may be EXP, USE BY, BEST BEFORE, or an exact printed date. If only a duration such as BEST BEFORE 6 MONTHS FROM PACKAGING is visible, put the exact text in expiryText and set expiry to null. calories and protein should only be returned when clearly printed on the package, otherwise null. confidence is 0 to 1 and reflects the clarity of the information actually read. Never invent missing information.`
+  const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': env.GEMINI_API_KEY,
+      'Api-Revision': '2026-05-20',
+    },
+    body: JSON.stringify({
+      model: 'gemma-4-31b-it',
+      input: [
+        { type: 'image', data: media.data, mime_type: media.mimeType },
+        { type: 'text', text: prompt },
+      ],
+    }),
+  })
+  if (!upstream.ok) return null
+  const raw = await upstream.json() as any
+  const text = String(raw.output_text || '').trim()
+  if (!text) return null
+  try { return JSON.parse(cleanJson(text)) as any } catch { return null }
+}
+
+function mergeProduct(database: any, ai: any, barcode: string) {
+  const name = database?.name || (typeof ai?.name === 'string' ? ai.name.trim() : '')
+  if (!name) return null
+  const product: Record<string, unknown> = {
+    id: String(database?.id || barcode),
+    name,
+    brand: database?.brand || (typeof ai?.brand === 'string' ? ai.brand.trim() : undefined),
+    calories: database?.calories,
+    protein: database?.protein,
+    currency: 'INR',
+    category: database?.category,
+    serving: database?.serving,
+    image: database?.image,
+    quantity: database?.quantity || (typeof ai?.quantity === 'string' ? ai.quantity.trim() : undefined),
+    nutriscore: database?.nutriscore,
+    source: database?.source || 'Package AI identification',
+    barcode,
+  }
+  const confidence = Number(ai?.confidence)
+  if (Number.isFinite(confidence)) product.confidence = Math.max(0, Math.min(1, confidence))
+  const mrp = Number(ai?.mrp)
+  if (Number.isFinite(mrp) && mrp >= 0) {
+    product.mrp = mrp
+    product.mrpSource = 'Package AI verification'
+  }
+  if (typeof ai?.expiry === 'string' && ai.expiry.trim()) {
+    product.expiry = ai.expiry.trim()
+    product.expirySource = 'Package AI verification'
+  } else if (typeof ai?.expiryText === 'string' && ai.expiryText.trim()) {
+    product.expiry = ai.expiryText.trim()
+    product.expirySource = 'Package AI verification'
+  }
+  if (product.calories == null && Number.isFinite(Number(ai?.calories))) product.calories = Number(ai.calories)
+  if (product.protein == null && Number.isFinite(Number(ai?.protein))) product.protein = Number(ai.protein)
+  return product
 }
 
 export default {
@@ -27,60 +124,50 @@ export default {
     const url = new URL(request.url)
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors })
 
-    const match = url.pathname.match(/^\/api\/product\/([^/]+)$/)
-    if (request.method === 'GET' && match) {
-      const barcode = decodeURIComponent(match[1]).replace(/[^0-9]/g, '')
+    const productMatch = url.pathname.match(/^\/api\/product\/([^/]+)$/)
+    if (request.method === 'GET' && productMatch) {
+      const barcode = normaliseBarcode(decodeURIComponent(productMatch[1]))
       if (!barcode) return json({ found: false, message: 'Invalid barcode.' }, 400)
-      const fields = ['code', 'product_name', 'product_name_en', 'brands', 'categories', 'quantity', 'image_front_url', 'nutriments', 'nutrition_grades', 'nutriscore_data', 'serving_size', 'product_type'].join(',')
       try {
-        const upstream = await fetch(`https://world.openfoodfacts.org/api/v3/product/${barcode}.json?product_type=all&fields=${encodeURIComponent(fields)}`, { headers: { Accept: 'application/json', 'User-Agent': 'ScanCart/1.0 (real-world barcode shopping app)' }, cf: { cacheTtl: 300, cacheEverything: true } } as RequestInit)
-        if (!upstream.ok) return json({ found: false, message: 'Product database is temporarily unavailable.' }, 502)
-        const raw = await upstream.json() as any
-        if (raw.status !== 1 || !raw.product) return json({ found: false, barcode, message: `Barcode ${barcode} was detected, but no product record was found in the connected product database.` }, 404, { 'Cache-Control': 'public, max-age=60' })
-        const p = raw.product
-        const n = p.nutriments || {}
-        const calories = Number(n['energy-kcal_serving'] ?? n['energy-kcal_100g'])
-        const protein = Number(n.proteins_serving ?? n.proteins_100g)
-        return json({ found: true, product: {
-          id: String(p.code || barcode),
-          name: String(p.product_name || p.product_name_en || '').trim() || 'Unnamed product',
-          brand: String(p.brands || '').split(',')[0].trim(),
-          calories: Number.isFinite(calories) ? calories : undefined,
-          protein: Number.isFinite(protein) ? protein : undefined,
-          currency: 'INR',
-          category: String(p.categories || '').split(',')[0].trim() || undefined,
-          serving: String(p.serving_size || '').trim() || undefined,
-          image: String(p.image_front_url || '').trim() || undefined,
-          quantity: String(p.quantity || '').trim() || undefined,
-          nutriscore: String(p.nutrition_grades || p.nutriscore_data?.grade || '').trim() || undefined,
-          source: 'Open Food Facts',
-        } })
-      } catch { return json({ found: false, message: 'Could not reach the product database. Please try again.' }, 502, { 'Cache-Control': 'no-store' }) }
+        const product = await lookupOpenFoodFacts(barcode)
+        if (!product) return json({ found: false, barcode, message: 'No product record was found for this barcode.' }, 404)
+        return json({ found: true, product }, 200, { 'Cache-Control': 'public, max-age=300' })
+      } catch {
+        return json({ found: false, message: 'Product database is temporarily unavailable.' }, 502)
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/resolve') {
+      try {
+        const body = await request.json() as { barcode?: string; image?: string }
+        const barcode = normaliseBarcode(body.barcode || '')
+        if (barcode.length < 8) return json({ found: false, message: 'Invalid barcode.' }, 400)
+        const database = await lookupOpenFoodFacts(barcode).catch(() => null)
+        const ai = body.image ? await analyzePackage(env, body.image, barcode).catch(() => null) : null
+        const product = mergeProduct(database, ai, barcode)
+        if (!product) return json({ found: false, barcode, message: 'The barcode was read, but no verified product identity was available. The package image was not clear enough to identify it.' }, 404)
+        return json({ found: true, product })
+      } catch {
+        return json({ found: false, message: 'Product analysis failed. Please scan the barcode again.' }, 422)
+      }
     }
 
     if (request.method === 'POST' && url.pathname === '/api/inspect') {
-      if (!env.GEMINI_API_KEY) return json({ found: false, message: 'AI package inspection is not configured on this deployment.' }, 503, { 'Cache-Control': 'no-store' })
       try {
         const body = await request.json() as { image?: string; barcode?: string }
         if (!body.image) return json({ found: false, message: 'Package image is required.' }, 400)
-        const image = normaliseImage(body.image)
-        const prompt = `You are ScanCart's package-data verifier. Inspect ONLY the supplied physical product image. Barcode ${body.barcode || 'unknown'} is context only. Read printed package information exactly. Never guess, infer, calculate, or invent missing values. Return ONLY valid JSON: {"mrp": number|null, "mrpText": string|null, "expiry": string|null, "expiryText": string|null, "quantity": string|null, "confidence": number}. MRP means the printed Maximum Retail Price in INR, not a store selling price. Accept Rs, ₹, INR and MRP markings. Expiry may be EXP, USE BY, BEST BEFORE or a printed date. If a date is only a duration such as Best Before 6 Months From Packaging, return the exact printed text in expiryText and leave expiry null. Confidence must reflect how clearly the printed information is visible. Do not return a value you cannot read.`
-        const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-          body: JSON.stringify({ model: 'gemma-4-31b-it', input: [{ type: 'image', data: image.data, mime_type: image.mimeType }, { type: 'text', text: prompt }] }),
-        })
-        const raw = await upstream.json() as any
-        if (!upstream.ok) return json({ found: false, message: 'The AI package verifier could not process this image.' }, 502, { 'Cache-Control': 'no-store' })
-        const parsed = JSON.parse(cleanJson(String(raw.output_text || '').trim())) as any
-        const confidence = Number(parsed.confidence)
-        const data: Record<string, unknown> = { confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0 }
-        if (typeof parsed.mrp === 'number' && Number.isFinite(parsed.mrp) && parsed.mrp >= 0) { data.mrp = parsed.mrp; data.mrpSource = 'Package AI verification' }
-        if (typeof parsed.expiry === 'string' && parsed.expiry.trim()) { data.expiry = parsed.expiry.trim(); data.expirySource = 'Package AI verification' }
-        else if (typeof parsed.expiryText === 'string' && parsed.expiryText.trim()) { data.expiry = parsed.expiryText.trim(); data.expirySource = 'Package AI verification' }
-        if (typeof parsed.quantity === 'string' && parsed.quantity.trim()) data.quantity = parsed.quantity.trim()
-        return json({ found: true, data }, 200, { 'Cache-Control': 'no-store' })
-      } catch { return json({ found: false, message: 'AI could not confidently read the printed package information. No value was invented.' }, 422, { 'Cache-Control': 'no-store' }) }
+        const ai = await analyzePackage(env, body.image, normaliseBarcode(body.barcode || ''))
+        if (!ai) return json({ found: false, message: 'AI package inspection is not configured or could not read the image.' }, 422)
+        const data: Record<string, unknown> = {}
+        const confidence = Number(ai.confidence)
+        if (Number.isFinite(confidence)) data.confidence = Math.max(0, Math.min(1, confidence))
+        const mrp = Number(ai.mrp)
+        if (Number.isFinite(mrp) && mrp >= 0) { data.mrp = mrp; data.mrpSource = 'Package AI verification' }
+        if (typeof ai.expiry === 'string' && ai.expiry.trim()) { data.expiry = ai.expiry.trim(); data.expirySource = 'Package AI verification' }
+        else if (typeof ai.expiryText === 'string' && ai.expiryText.trim()) { data.expiry = ai.expiryText.trim(); data.expirySource = 'Package AI verification' }
+        if (typeof ai.quantity === 'string' && ai.quantity.trim()) data.quantity = ai.quantity.trim()
+        return json({ found: true, data })
+      } catch { return json({ found: false, message: 'AI could not confidently read the package.' }, 422) }
     }
 
     return env.ASSETS.fetch(request)
