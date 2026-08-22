@@ -43,6 +43,7 @@ function extractGeminiText(raw: any) {
 
 function extractCloudflareText(raw: any) {
   if (typeof raw?.response === 'string') return raw.response.trim()
+  if (typeof raw?.result?.response === 'string') return raw.result.response.trim()
   if (typeof raw === 'string') return raw.trim()
   return ''
 }
@@ -71,6 +72,11 @@ function validBarcode(value: string) {
     for (let i = 0; i < 7; i++) sum += Number(value[i]) * (i % 2 ? 3 : 1)
     return (10 - (sum % 10)) % 10 === Number(value[7])
   }
+  if (/^\d{14}$/.test(value)) {
+    let sum = 0
+    for (let i = 0; i < 13; i++) sum += Number(value[i]) * (i % 2 ? 3 : 1)
+    return (10 - (sum % 10)) % 10 === Number(value[13])
+  }
   return false
 }
 
@@ -83,18 +89,16 @@ function normaliseImage(image: string) {
 async function cloudflareImageJson(env: Env, image: string, prompt: string) {
   if (!env.AI) return null
   try {
+    // Workers AI vision models accept the image as a top-level `image` input.
+    // Sending it as an OpenAI-style content block does not work with env.AI.run().
     const result = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: image } },
-        ],
-      }],
+      prompt,
+      image,
       max_tokens: 700,
       temperature: 0,
     })
-    return parseJson(extractCloudflareText(result))
+    const text = extractCloudflareText(result)
+    return parseJson(text)
   } catch {
     return null
   }
@@ -124,7 +128,6 @@ async function lookupOpenFoodFacts(barcode: string) {
   const url = `https://world.openfoodfacts.org/api/v3/product/${barcode}.json?product_type=all&fields=${encodeURIComponent(fields)}`
   const upstream = await fetch(url, {
     headers: { Accept: 'application/json', 'User-Agent': 'ScanCart/2.2 (real-world barcode shopping app)' },
-    cf: { cacheTtl: 300, cacheEverything: true },
   } as RequestInit)
   if (!upstream.ok) return null
   const raw = await upstream.json() as any
@@ -202,7 +205,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors })
 
     if (request.method === 'GET' && url.pathname === '/api/health') {
-      return json({ ok: true, ai: Boolean(env.AI || env.GEMINI_API_KEY), cloudflareAI: Boolean(env.AI), gemini: Boolean(env.GEMINI_API_KEY) })
+      return json({ ok: true, ai: Boolean(env.AI || env.GEMINI_API_KEY), cloudflareAI: Boolean(env.AI), gemini: Boolean(env.GEMINI_API_KEY), model: env.AI ? '@cf/google/gemma-4-26b-a4b-it' : null })
     }
 
     const productMatch = url.pathname.match(/^\/api\/product\/([^/]+)$/)
@@ -225,11 +228,7 @@ export default {
         const ai = await analyzeBarcode(env, body.image)
         const barcode = normaliseBarcode(String(ai?.barcode || ''))
         if (!plausibleBarcode(barcode)) {
-          return json({
-            found: false,
-            configured: Boolean(env.AI || env.GEMINI_API_KEY),
-            message: env.AI || env.GEMINI_API_KEY ? 'The AI could not read the complete barcode. Move the camera closer and keep the bars sharp.' : 'No AI vision backend is configured.',
-          }, 503)
+          return json({ found: false, configured: Boolean(env.AI || env.GEMINI_API_KEY), message: env.AI || env.GEMINI_API_KEY ? 'The AI could not read the complete barcode. Move the camera closer and keep the bars sharp.' : 'No AI vision backend is configured.' }, 503)
         }
         return json({ found: true, barcode, verified: validBarcode(barcode), confidence: Number(ai?.confidence) || undefined })
       } catch {
