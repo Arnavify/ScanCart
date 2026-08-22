@@ -1,26 +1,14 @@
 import { BrowserMultiFormatReader } from '@zxing/browser'
-import { BarcodeFormat, DecodeHintType } from '@zxing/library'
 
 type Detected = { rawValue?: string }
 type BarcodeDetectorLike = new (options?: { formats?: string[] }) => {
   detect: (source: HTMLVideoElement | HTMLCanvasElement) => Promise<Detected[]>
 }
-
 type ScannerControls = { stop: () => void }
 
 const BarcodeDetectorCtor = (globalThis as typeof globalThis & {
   BarcodeDetector?: BarcodeDetectorLike
 }).BarcodeDetector
-
-const ONE_D_FORMATS = [
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-  BarcodeFormat.CODE_128,
-  BarcodeFormat.CODE_39,
-  BarcodeFormat.ITF,
-]
 
 const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf']
 
@@ -52,22 +40,18 @@ function validUpcA(value: string): boolean {
 function normalize(value: unknown): string {
   const clean = cleanBarcode(value)
   if (validEan13(clean) || validEan8(clean) || validUpcA(clean)) return clean
-  if (clean.length >= 8 && clean.length <= 14) return clean
-  return ''
+  return clean.length >= 8 && clean.length <= 14 ? clean : ''
 }
 
 function makeCanvas(video: HTMLVideoElement, mode: 'full' | 'wide' | 'tight' | 'gray'): HTMLCanvasElement {
   const vw = video.videoWidth
   const vh = video.videoHeight
-  const maxWidth = 1600
-  const scale = Math.min(1, maxWidth / vw)
-  const fullW = Math.max(640, Math.round(vw * scale))
-  const fullH = Math.max(360, Math.round(vh * scale))
-
+  const scale = Math.min(1, 1600 / vw)
   let sx = 0
   let sy = 0
   let sw = vw
   let sh = vh
+
   if (mode === 'wide') {
     sw = vw * 0.9
     sh = vh * 0.72
@@ -81,8 +65,8 @@ function makeCanvas(video: HTMLVideoElement, mode: 'full' | 'wide' | 'tight' | '
   }
 
   const canvas = document.createElement('canvas')
-  canvas.width = Math.round(sw * scale)
-  canvas.height = Math.round(sh * scale)
+  canvas.width = Math.max(640, Math.round(sw * scale))
+  canvas.height = Math.max(360, Math.round(sh * scale))
   const ctx = canvas.getContext('2d', { willReadFrequently: mode === 'gray' })
   if (!ctx) return canvas
   ctx.imageSmoothingEnabled = true
@@ -114,20 +98,19 @@ async function nativeDecode(detector: InstanceType<BarcodeDetectorLike>, video: 
       if (value) return value
     }
   } catch {
-    // Native BarcodeDetector is optional. ZXing remains the fallback.
+    // BarcodeDetector is optional. ZXing remains the fallback.
   }
   return ''
 }
 
 function zxingDecode(reader: any, video: HTMLVideoElement): string {
-  const modes: Array<'full' | 'wide' | 'tight' | 'gray'> = ['full', 'wide', 'tight', 'gray']
-  for (const mode of modes) {
+  for (const mode of ['full', 'wide', 'tight', 'gray'] as const) {
     try {
       const result = reader.decodeFromCanvas(makeCanvas(video, mode))
       const value = normalize(result?.getText?.())
       if (value) return value
     } catch {
-      // Not found or checksum errors are normal between frames.
+      // No barcode in this frame is expected.
     }
   }
   return ''
@@ -162,7 +145,6 @@ if (!prototype.__scanCartPatched) {
     }
 
     const report = (value: string) => {
-      if (!value) return
       if (value === stableValue) stableCount += 1
       else {
         stableValue = value
@@ -203,6 +185,5 @@ if (!prototype.__scanCartPatched) {
     }
   }
 
-  // Keep the original method available for emergency diagnostics.
   prototype.__scanCartOriginalDecodeFromVideoElement = original
 }
