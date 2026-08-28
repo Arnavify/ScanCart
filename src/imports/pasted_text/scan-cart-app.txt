@@ -1,0 +1,674 @@
+Build the complete ScanCart app as a **fully functional, runnable application** based on the attached ScanCart reference image.
+
+## CRITICAL FINAL REQUIREMENT
+
+**DO NOT ONLY CREATE THE UI IN FIGMA.**
+
+I need you to create the **complete working application source code** and then **PACKAGE THE ENTIRE PROJECT INTO A SINGLE `.ZIP` FILE**.
+
+The final deliverable MUST be:
+
+**`ScanCart.zip`**
+
+The ZIP must contain everything required to run the application.
+
+Do not give me only Figma frames, screenshots, design files, or individual code snippets.
+
+## ZIP CONTENTS
+
+The ZIP should contain a complete project such as:
+
+```text
+ScanCart.zip
+├── package.json
+├── README.md
+├── src/
+├── public/
+├── assets/
+├── data/
+├── components/
+├── pages/
+└── all other required project files
+```
+
+Include all dependencies/configuration required to run the application.
+
+The README must explain exactly how to install and run it.
+
+The project should run with the standard commands appropriate for the generated framework, such as:
+
+```bash
+npm install
+npm run dev
+```
+
+If you use another framework or command, document it clearly in README.md.
+
+## IMPORTANT
+
+The app must work independently after extracting the ZIP.
+
+Do not require me to manually copy code from Figma.
+
+Do not leave important functionality as pseudocode.
+
+Do not leave TODO comments for core functionality.
+
+Do not create fake buttons that do nothing.
+
+All major interactions must work.
+
+---
+
+# APP: SCANCART
+
+ScanCart is a mobile-first barcode shopping and nutrition assistant.
+
+The main interaction is:
+
+**SCAN → IDENTIFY → ANALYZE → VERIFY → ADD TO CART → SCAN MORE → CHECKOUT**
+
+The user scans a product barcode.
+
+The app identifies the product.
+
+It then displays whatever product information is available, including:
+
+* Product name
+* Brand
+* Calories
+* Protein
+* Carbohydrates
+* Fat
+* Serving size
+* MRP
+* Ingredients
+* Expiry date
+* Product category
+
+The app must clearly distinguish between information obtained from a product database, information detected through OCR, information entered by the user, and unavailable information.
+
+## IMPORTANT BARCODE LOGIC
+
+Do NOT pretend that a normal barcode directly contains calories, nutrition information, expiry date, or MRP.
+
+The barcode should be treated as a product identifier.
+
+Use a local mock product database for the prototype.
+
+Expiry dates should be handled separately through an expiry-date OCR simulation or manual entry.
+
+MRP can come from product data or package OCR.
+
+If information is unavailable, display:
+
+**Not available**
+
+Do not invent missing information.
+
+---
+
+# DESIGN
+
+Follow the attached reference image closely.
+
+Use:
+
+* Black background
+* Dark charcoal cards
+* Orange primary accent
+* White primary text
+* Grey secondary text
+* Rounded cards
+* Minimal icons
+* Modern typography
+* High contrast
+* Mobile-first layout
+
+Do not introduce unrelated colors or visual styles.
+
+Target mobile width:
+
+**390px**
+
+Also make the layout work reasonably at 375px and 430px.
+
+---
+
+# MAIN SCREENS
+
+Create all of these screens and make them functional.
+
+### 1. HOME
+
+Header:
+
+**Track your health.**
+**Scan as you shop.**
+
+Show:
+
+* Total Calories
+* Cart Value
+* Start Scanning
+* Recent Scans
+
+If there are no scans:
+
+**No recent scans**
+
+**Scan a product to see it here.**
+
+---
+
+### 2. BARCODE SCANNER
+
+Create a realistic camera scanning interface.
+
+Include:
+
+* Large scanning frame
+* Scanning animation
+* Flash button
+* Close button
+* Options button
+* Scan instruction
+* Camera permission state
+
+Text:
+
+**Scan a barcode**
+
+**Point your camera at the product barcode**
+
+The prototype should simulate barcode detection.
+
+---
+
+### 3. SCANNING
+
+Show:
+
+**Barcode Detected**
+
+Then:
+
+**Analyzing product...**
+
+Show animated processing states:
+
+* Barcode identified
+* Product matched
+* Nutrition found
+* Price found
+* Product information loaded
+
+Then automatically transition to the product result.
+
+---
+
+### 4. PRODUCT RESULT
+
+Example:
+
+**Mineral Water**
+
+**Varahi**
+
+Display:
+
+**0 kcal**
+
+**₹30 MRP**
+
+**0 g Protein**
+
+Also show:
+
+**Data source: Product database**
+
+Include:
+
+**Expiry**
+
+If no expiry is available:
+
+**Not detected**
+
+Button:
+
+**Scan Expiry Date**
+
+Primary button:
+
+**Add to Cart**
+
+Secondary:
+
+**Scan Another Product**
+
+---
+
+### 5. EXPIRY SCANNER
+
+Header:
+
+**Scan expiry date**
+
+Instruction:
+
+**Point your camera at the expiry or best-before date.**
+
+Simulate OCR detection.
+
+States:
+
+* Searching
+* Date detected
+* Failed
+
+Example detected result:
+
+**Expiry detected**
+
+**18 Sep 2026**
+
+Buttons:
+
+**Confirm Date**
+
+**Enter Manually**
+
+If OCR fails:
+
+**Expiry date not detected**
+
+Buttons:
+
+**Try Again**
+
+**Enter Manually**
+
+---
+
+### 6. ADDED TO CART
+
+Show confirmation:
+
+**Added to cart**
+
+Display product information and quantity.
+
+Buttons:
+
+**Continue Scanning**
+
+**View Cart**
+
+Continue Scanning must return to the scanner.
+
+---
+
+### 7. CART
+
+Header:
+
+**Your Cart**
+
+**Everything in one place.**
+
+Every product card must contain:
+
+* Product icon/image
+* Product name
+* Calories
+* MRP
+* Quantity
+* Minus button
+* Plus button
+* Delete button
+
+Quantity starts at:
+
+**1**
+
+Never show `0` as an active cart quantity.
+
+Changing quantity must dynamically update:
+
+**Total Calories**
+
+and
+
+**Total MRP**
+
+Example:
+
+Buldak Ramen:
+
+530 kcal × 2 = 1060 kcal
+
+₹130 × 2 = ₹260
+
+Primary button:
+
+**Proceed to Pay ₹369**
+
+---
+
+### 8. PRODUCT DETAILS
+
+Show:
+
+* Product name
+* Brand
+* Calories
+* Protein
+* Carbohydrates
+* Fat
+* Serving size
+* MRP
+* Expiry
+* Ingredients
+* Product category
+* Data source
+
+Use:
+
+**Not available**
+
+when information does not exist.
+
+Never fabricate information.
+
+---
+
+### 9. CHECKOUT
+
+Header:
+
+**Checkout**
+
+Show:
+
+**Order Summary**
+
+Show every item and quantity.
+
+Show:
+
+**Total Calories**
+
+**Total**
+
+Payment methods:
+
+* UPI
+* Credit/Debit Card
+* Wallet
+
+The user must select a payment method before the payment button becomes active.
+
+Button:
+
+**Complete Payment ₹369**
+
+---
+
+### 10. PAYMENT SUCCESS
+
+Show:
+
+**Payment successful**
+
+Example:
+
+**Order #SC10284**
+
+Show:
+
+* Products
+* Quantity
+* Total
+* Calories
+
+Buttons:
+
+**Back to Home**
+
+**View Order**
+
+---
+
+### 11. SCAN HISTORY
+
+Show previous scans.
+
+Each item should contain:
+
+* Product
+* Date/time
+* Calories
+* Price
+* Expiry status
+
+Tapping an item opens Product Details.
+
+---
+
+### 12. UNKNOWN BARCODE
+
+If a barcode does not exist in the local product database:
+
+Show:
+
+**Product not found**
+
+**We could not find information for this barcode.**
+
+Buttons:
+
+**Scan Again**
+
+**Enter Barcode Manually**
+
+**Add Product Manually**
+
+---
+
+# SAMPLE PRODUCT DATABASE
+
+Create a local mock database with at least these products.
+
+### Buldak Ramen
+
+Brand: Samyang
+
+Calories: 530 kcal
+
+Protein: 11 g
+
+MRP: ₹130
+
+### Dunkin Donut
+
+Brand: Dunkin
+
+Calories: 393 kcal
+
+MRP: ₹209
+
+### Mineral Water
+
+Brand: Varahi
+
+Calories: 0 kcal
+
+Protein: 0 g
+
+MRP: ₹30
+
+Give each product a simulated barcode ID.
+
+Scanning each barcode must return the correct product.
+
+---
+
+# FUNCTIONAL REQUIREMENTS
+
+Implement actual application state.
+
+Track:
+
+* Current scanned product
+* Cart
+* Quantities
+* Total calories
+* Total price
+* Scan history
+* Expiry date
+* Selected payment method
+* Scanner state
+* Product analysis state
+
+Cart totals must update dynamically.
+
+Deleting a product must actually remove it.
+
+Quantity controls must actually work.
+
+Navigation must work.
+
+Checkout must work.
+
+Payment selection must work.
+
+Payment success must work.
+
+Scan history must update when products are scanned.
+
+---
+
+# ERROR STATES
+
+Implement functional states for:
+
+* Camera permission denied
+* Barcode not detected
+* Unknown barcode
+* Product information unavailable
+* Expiry OCR failed
+* Expiry unavailable
+* Empty cart
+* Payment failed
+* Network/API unavailable
+
+Every error state needs a useful recovery action.
+
+---
+
+# NAVIGATION
+
+Bottom navigation:
+
+**Home | Scan | Cart**
+
+The Scan button should be the visually dominant center button.
+
+Main flow:
+
+**Home**
+
+→ Start Scanning
+
+→ Scanner
+
+→ Barcode Detected
+
+→ Analyzing
+
+→ Product Result
+
+→ Scan Expiry
+
+→ Confirm Expiry
+
+→ Add To Cart
+
+→ Scanner
+
+→ Scan More Products
+
+→ Cart
+
+→ Checkout
+
+→ Payment
+
+→ Payment Success
+
+→ Home
+
+---
+
+# TECHNICAL REQUIREMENTS
+
+Create a proper component-based application.
+
+Use reusable components for:
+
+* ProductCard
+* QuantityStepper
+* BottomNavigation
+* Scanner
+* ProductDetails
+* CartSummary
+* PaymentOption
+* StatusBadge
+* Modal
+* Button
+* LoadingState
+* ErrorState
+
+Keep product data separate from UI components.
+
+Keep cart state centralized.
+
+Use clean, maintainable code.
+
+Avoid duplicating screens unnecessarily.
+
+---
+
+# FINAL EXPORT
+
+After creating the complete application:
+
+1. Verify that every major screen works.
+2. Verify navigation.
+3. Verify cart calculations.
+4. Verify quantity controls.
+5. Verify product scanning simulation.
+6. Verify expiry scanning simulation.
+7. Verify checkout.
+8. Verify payment success.
+9. Verify error states.
+10. Verify the application builds successfully.
+11. Include a README with setup instructions.
+12. Package the COMPLETE PROJECT into one ZIP archive.
+
+## FINAL OUTPUT MUST BE A ZIP
+
+Create and provide:
+
+**`ScanCart.zip`**
+
+Do not provide only screenshots.
+
+Do not provide only Figma designs.
+
+Do not provide only source-code snippets.
+
+Do not ask me to manually assemble the project.
+
+**I need the complete runnable ScanCart project packaged as a single ZIP file.**
